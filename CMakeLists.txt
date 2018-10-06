@@ -8,7 +8,7 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${test_opencv_SOURCE_DIR}/bin)
 # set the directory of executable files
 add_executable(face_air src/main.cpp)
 aux_source_directory(./src DIRSRCS)
-add_executable(detect_recog_track ${DIRSRCS})
+add_executable(detect_recog_track ${DIRSRCS} include/inference.h src/inference.cpp include/sample_functions.h)
 include_directories(include)
 
 # setup CUDA

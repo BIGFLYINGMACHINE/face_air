@@ -1,3 +1,6 @@
+//
+// Created by zack on 18-10-6.
+//
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
@@ -9,14 +12,15 @@
 #include <unordered_map>
 #include <cassert>
 #include <vector>
+#include <opencv2/opencv.hpp>
 #include "NvInfer.h"
 #include "NvUffParser.h"
-
+#include "common.h"
 #include "NvUtils.h"
 
 using namespace nvuffparser;
 using namespace nvinfer1;
-#include "common.h"
+
 
 static Logger gLogger;
 static int gDLA{0};
@@ -32,25 +36,25 @@ static int gDLA{0};
 
 inline int64_t volume(const Dims& d)
 {
-	int64_t v = 1;
-	for (int64_t i = 0; i < d.nbDims; i++)
-		v *= d.d[i];
-	return v;
+    int64_t v = 1;
+    for (int64_t i = 0; i < d.nbDims; i++)
+        v *= d.d[i];
+    return v;
 }
 
 
 inline unsigned int elementSize(DataType t)
 {
-	switch (t)
-	{
-	case DataType::kINT32:
-		// Fallthrough, same as kFLOAT
-	case DataType::kFLOAT: return 4;
-	case DataType::kHALF: return 2;
-	case DataType::kINT8: return 1;
-	}
-	assert(0);
-	return 0;
+    switch (t)
+    {
+        case DataType::kINT32:
+            // Fallthrough, same as kFLOAT
+        case DataType::kFLOAT: return 4;
+        case DataType::kHALF: return 2;
+        case DataType::kINT8: return 1;
+    }
+    assert(0);
+    return 0;
 }
 
 
@@ -65,7 +69,10 @@ std::string locateFile(const std::string& input)
     return locateFile(input,dirs);
 }
 
+void cv_image2file(std::vector<std::vector<cv::Mat>>, uint8_t buffer[INPUT_H*INPUT_W])
+{
 
+}
 // simple PGM (portable greyscale map) reader
 void readPGMFile(const std::string& filename,  uint8_t buffer[INPUT_H*INPUT_W])
 {
@@ -123,15 +130,42 @@ void* createMnistCudaBuffer(int64_t eltCount, DataType dtype, int run)
 
     /* initialize the inputs buffer */
     for (int i = 0; i < eltCount; i++)
+        // MNIST 源数据是与常理黑白倒置的
         inputs[i] = 1.0 - float(fileData[i]) / 255.0;
 
     void* deviceMem = safeCudaMalloc(memSize);
+    // copy inputs(pointer to image data) to deviceMem
     CHECK(cudaMemcpy(deviceMem, inputs, memSize, cudaMemcpyHostToDevice));
 
     delete[] inputs;
     return deviceMem;
 }
 
+void* createFacenetCudaBuffer(int64_t eltCount, DataType dtype, int run)
+{
+    /* in that specific case, eltCount == INPUT_H * INPUT_W */
+    assert(eltCount == INPUT_H * INPUT_W);
+    assert(elementSize(dtype) == sizeof(float));
+
+    size_t memSize = eltCount * elementSize(dtype);
+    float* inputs = new float[eltCount];
+
+    /* read PGM file */
+    uint8_t fileData[INPUT_H * INPUT_W];
+    readPGMFile(std::to_string(run) + ".pgm", fileData);
+
+    /* initialize the inputs buffer */
+    for (int i = 0; i < eltCount; i++)
+        // MNIST 源数据是与常理黑白倒置的
+        inputs[i] = 1.0 - float(fileData[i]) / 255.0;
+
+    void* deviceMem = safeCudaMalloc(memSize);
+    // copy inputs(pointer to image data) to deviceMem
+    CHECK(cudaMemcpy(deviceMem, inputs, memSize, cudaMemcpyHostToDevice));
+
+    delete[] inputs;
+    return deviceMem;
+}
 
 void printOutput(int64_t eltCount, DataType dtype, void* buffer)
 {
@@ -193,10 +227,10 @@ ICudaEngine* loadModelAndCreateEngine(const char* uffFile, int maxBatchSize,
 }
 
 
-void execute(ICudaEngine& engine)
+void _execute(ICudaEngine& engine, int num_faces=1)
 {
     IExecutionContext* context = engine.createExecutionContext();
-    int batchSize = 1;
+    int batchSize = num_faces;
 
     int nbBindings = engine.getNbBindings();
     assert(nbBindings == 2);
@@ -205,6 +239,7 @@ void execute(ICudaEngine& engine)
     auto buffersSizes = calculateBindingBufferSizes(engine, nbBindings, batchSize);
 
     int bindingIdxInput = 0;
+    // 找出输入的索引
     for (int i = 0; i < nbBindings; ++i)
     {
         if (engine.bindingIsInput(i))
@@ -223,9 +258,11 @@ void execute(ICudaEngine& engine)
     int numberRun = 10;
     for (int i = 0; i < iterations; i++)
     {
-        float total = 0, ms;
+        float total = 0;
+        float ms;
         for (int run = 0; run < numberRun; run++)
         {
+
             buffers[bindingIdxInput] = createMnistCudaBuffer(bufferSizesInput.first,
                                                              bufferSizesInput.second, run);
 
@@ -257,8 +294,65 @@ void execute(ICudaEngine& engine)
     context->destroy();
 }
 
+void execute(ICudaEngine& engine, int num_faces=1)
+{
 
-int main(int argc, char** argv)
+    IExecutionContext* context = engine.createExecutionContext();
+    int batchSize = num_faces;
+
+    int nbBindings = engine.getNbBindings();
+    assert(nbBindings == 2);
+
+    std::vector<void*> buffers(nbBindings);
+    auto buffersSizes = calculateBindingBufferSizes(engine, nbBindings, batchSize);
+
+    int bindingIdxInput = 0;
+    // 找出输入的索引
+    for (int i = 0; i < nbBindings; ++i)
+    {
+        if (engine.bindingIsInput(i))
+            bindingIdxInput = i;
+        else
+        {
+            auto bufferSizesOutput = buffersSizes[i];
+            buffers[i] = safeCudaMalloc(bufferSizesOutput.first *
+                                        elementSize(bufferSizesOutput.second));
+        }
+    }
+
+    auto bufferSizesInput = buffersSizes[bindingIdxInput];
+
+    int iterations = 1;
+    int numberRun = 10;
+    for (int i = 0; i < iterations; i++)
+    {
+        for (int run = 0; run < numberRun; run++)
+        {
+
+            buffers[bindingIdxInput] = createFacenetCudaBuffer(bufferSizesInput.first,
+                                                             bufferSizesInput.second, run);
+
+            for (int bindingIdx = 0; bindingIdx < nbBindings; ++bindingIdx)
+            {
+                if (engine.bindingIsInput(bindingIdx))
+                    continue;
+
+                auto bufferSizesOutput = buffersSizes[bindingIdx];
+                printOutput(bufferSizesOutput.first, bufferSizesOutput.second,
+                            buffers[bindingIdx]);
+            }
+            CHECK(cudaFree(buffers[bindingIdxInput]));
+        }
+    }
+
+    for (int bindingIdx = 0; bindingIdx < nbBindings; ++bindingIdx)
+        if (!engine.bindingIsInput(bindingIdx))
+            CHECK(cudaFree(buffers[bindingIdx]));
+    context->destroy();
+}
+
+
+int min(int argc, char** argv)
 {
     gDLA = samplesCommon::parseDLA(argc, argv);
     auto fileName = locateFile("lenet5.uff");
@@ -279,7 +373,7 @@ int main(int argc, char** argv)
     /* we need to keep the memory created by the parser */
     parser->destroy();
 
-    execute(*engine);
+    _execute(*engine);
     engine->destroy();
     shutdownProtobufLibrary();
     return EXIT_SUCCESS;
